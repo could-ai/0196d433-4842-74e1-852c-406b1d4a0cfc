@@ -1,0 +1,102 @@
+name: Flutter Android App Bundle Build and Publish
+on:
+  workflow_dispatch: # Allows manual triggering of the workflow
+jobs:
+  flutter_android_bundle_build:
+    runs-on: ubuntu-latest
+    outputs:
+      app_exists: ${{ steps.deploy_to_google_play.outputs.app_exists }} # 将app_exists作为job输出
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Java
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      - name: Setup Ruby for Fastlane
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.2'
+          channel: 'stable'
+      - name: Get dependencies
+        working-directory: ./usr
+        run: flutter pub get
+      - name: Setup Android signing
+        run: |
+          echo "Setting up Android signing configuration..."
+          # 创建keystore文件，确保路径名和内容正确
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > keystore.jks
+          
+          # 验证keystore文件
+          echo "验证keystore文件是否有效..."
+          ls -la keystore.jks
+          
+          # 使用keytool验证keystore的有效性和所有别名详情
+          echo "验证keystore详细信息..."
+          keytool -list -v -keystore keystore.jks -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+          
+          # 确保android目录存在（通常应该已存在，但以防万一）
+          echo "确保android目录存在..."
+          mkdir -p ./usr/android
+          
+          # 创建key.properties文件，确保storeFile使用绝对路径
+          KEYSTORE_PATH="$(pwd)/keystore.jks"
+          echo "使用keystore路径: $KEYSTORE_PATH"
+          
+          echo "storeFile=$KEYSTORE_PATH" > ./usr/android/key.properties
+          echo "storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> ./usr/android/key.properties
+          echo "keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}" >> ./usr/android/key.properties
+          echo "keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}" >> ./usr/android/key.properties
+          
+          # 验证key.properties文件内容（不显示密码）
+          echo "key.properties created at: ./usr/android/key.properties"
+          cat ./usr/android/key.properties | grep -v "storePassword\|keyPassword"
+          
+          # 验证Gradle能正确找到key.properties
+          echo "验证android目录结构..."
+          ls -la ./usr/android/
+          
+          # 验证密钥库中是否包含指定的别名
+          echo "验证密钥库中是否包含别名: ${{ secrets.ANDROID_KEY_ALIAS }}"
+          keytool -list -v -keystore keystore.jks -storepass "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" | grep -i "alias name: ${{ secrets.ANDROID_KEY_ALIAS }}"
+      - name: Build Android application
+        working-directory: ./usr
+        run: flutter build appbundle --release
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-bundle
+          path: ./usr/build/app/outputs/bundle/release/*.aab
+          retention-days: 7
+      - name: Install Fastlane
+        run: gem install fastlane
+      - name: Check Fastlane configuration
+        working-directory: ./usr/android
+        run: |
+          echo "Checking Fastlane directory structure:"
+          ls -la fastlane/
+          echo "\nChecking Fastfile content:"
+          cat fastlane/Fastfile
+      - name: Deploy to Google Play
+        id: deploy_to_google_play
+        working-directory: ./usr/android
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+        run: fastlane publish_to_play_store
+      - name: Generate result information
+        run: |
+          echo "APP_EXISTS: ${{ steps.deploy_to_google_play.outputs.app_exists }}"
+          # 创建结果信息文件
+          echo '{"app_exists": "${{ steps.deploy_to_google_play.outputs.app_exists }}"}' > app_status.json
+      - name: Upload status information
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-status-info
+          path: app_status.json
+          retention-days: 7
